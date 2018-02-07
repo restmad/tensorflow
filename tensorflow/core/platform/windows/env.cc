@@ -24,9 +24,9 @@ limitations under the License.
 #undef LoadLibrary
 #undef ERROR
 
+#include <string>
 #include <thread>
 #include <vector>
-#include <string>
 
 #include "tensorflow/core/lib/core/error_codes.pb.h"
 #include "tensorflow/core/platform/load_library.h"
@@ -53,13 +53,12 @@ class StdThread : public Thread {
 
 class WindowsEnv : public Env {
  public:
-  WindowsEnv()
-      : GetSystemTimePreciseAsFileTime_(NULL) {
+  WindowsEnv() : GetSystemTimePreciseAsFileTime_(NULL) {
     // GetSystemTimePreciseAsFileTime function is only available in the latest
     // versions of Windows. For that reason, we try to look it up in
     // kernel32.dll at runtime and use an alternative option if the function
     // is not available.
-    HMODULE module = GetModuleHandle("kernel32.dll");
+    HMODULE module = GetModuleHandleW(L"kernel32.dll");
     if (module != NULL) {
       auto func = (FnGetSystemTimePreciseAsFileTime)GetProcAddress(
           module, "GetSystemTimePreciseAsFileTime");
@@ -72,7 +71,9 @@ class WindowsEnv : public Env {
   }
 
   bool MatchPath(const string& path, const string& pattern) override {
-    return PathMatchSpec(path.c_str(), pattern.c_str()) == TRUE;
+    std::wstring ws_path(WindowsFileSystem::Utf8ToWideChar(path));
+    std::wstring ws_pattern(WindowsFileSystem::Utf8ToWideChar(pattern));
+    return PathMatchSpecW(ws_path.c_str(), ws_pattern.c_str()) == TRUE;
   }
 
   void SleepForMicroseconds(int64 micros) override { Sleep(micros / 1000); }
@@ -120,12 +121,14 @@ class WindowsEnv : public Env {
     SetThreadpoolTimer(timer, &FileDueTime, 0, 0);
   }
 
-  Status LoadLibrary(const char *library_filename, void** handle) override {
+  Status LoadLibrary(const char* library_filename, void** handle) override {
     std::string file_name = library_filename;
     std::replace(file_name.begin(), file_name.end(), '/', '\\');
 
-    HMODULE hModule = LoadLibraryEx(file_name.c_str(), NULL,
-      LOAD_WITH_ALTERED_SEARCH_PATH);
+    std::wstring ws_file_name(WindowsFileSystem::Utf8ToWideChar(file_name));
+
+    HMODULE hModule = LoadLibraryExW(ws_file_name.c_str(), NULL,
+                                     LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!hModule) {
       return errors::NotFound(file_name + " not found");
     }
@@ -134,31 +137,30 @@ class WindowsEnv : public Env {
   }
 
   Status GetSymbolFromLibrary(void* handle, const char* symbol_name,
-    void** symbol) override {
+                              void** symbol) override {
     FARPROC found_symbol;
 
     found_symbol = GetProcAddress((HMODULE)handle, symbol_name);
     if (found_symbol == NULL) {
       return errors::NotFound(std::string(symbol_name) + " not found");
     }
-    *symbol = (void **)found_symbol;
+    *symbol = (void**)found_symbol;
     return Status::OK();
   }
 
-  string FormatLibraryFileName(const string& name, const string& version)
-    override {
+  string FormatLibraryFileName(const string& name,
+                               const string& version) override {
     string filename;
     if (version.size() == 0) {
       filename = name + ".dll";
-    }
-    else {
+    } else {
       filename = name + version + ".dll";
     }
     return filename;
   }
 
  private:
-  typedef VOID(WINAPI * FnGetSystemTimePreciseAsFileTime)(LPFILETIME);
+  typedef VOID(WINAPI* FnGetSystemTimePreciseAsFileTime)(LPFILETIME);
   FnGetSystemTimePreciseAsFileTime GetSystemTimePreciseAsFileTime_;
 };
 

@@ -71,9 +71,9 @@ class ServiceOptions {
   int intra_op_parallelism_threads_ = -1;
 };
 
-// The XLA service object, which is the same across all
-// platforms. It maintains the service state of computations and allocations,
-// and delegates target-specific requests to the target-specific infrastructure
+// The XLA service object, which is the same across all platforms. It maintains
+// the service state of computations and allocations, and delegates
+// target-specific requests to the target-specific infrastructure
 // (target-specific compiler, StreamExecutor).
 class Service : public ServiceInterface {
  public:
@@ -250,49 +250,45 @@ class Service : public ServiceInterface {
   // class.
   StatusOr<std::unique_ptr<HloModuleConfig>> CreateModuleConfig(
       const ProgramShape& program_shape,
-      tensorflow::gtl::ArraySlice<const Allocation*> arguments,
-      const ExecutionOptions& execution_options);
+      tensorflow::gtl::ArraySlice<const ShapedBuffer*> arguments,
+      const ExecutionOptions& execution_options,
+      const UserComputation& user_computation);
 
  protected:
   friend class LocalExecutable;
 
   // The constructor is private. Use the NewService factory to create new
   // service objects.
-  Service(const ServiceOptions& options, std::unique_ptr<Backend> backend,
-          std::unique_ptr<Backend> compute_constant_backend);
+  Service(const ServiceOptions& options,
+          std::unique_ptr<Backend> execute_backend);
 
   static StatusOr<std::unique_ptr<Backend>> CreateComputeConstantBackend();
 
   // Resolves the given argument handles in the allocation tracker and returns
   // the corresponding allocations. The function also verifies that each
-  // allocation matches the given backend and device ordinal.
-  StatusOr<std::vector<const Allocation*>> ResolveAndValidateArguments(
+  // allocation matches the execution platform and device ordinal.
+  StatusOr<std::vector<const ShapedBuffer*>> ResolveAndValidateArguments(
       tensorflow::gtl::ArraySlice<const GlobalDataHandle*> arguments,
-      const Backend* backend, int device_ordinal);
+      int device_ordinal);
 
   // Create a Hlo module config for the given program shape and arguments.
   // execution_options is optional; if not given a default is used.
-  // has_hybrid_result is used to initialize the same-named field in
-  // HloModuleConfig -- see that class for documentation.
   StatusOr<std::unique_ptr<HloModuleConfig>> CreateModuleConfig(
       const ProgramShape& program_shape,
       tensorflow::gtl::ArraySlice<const Shape*> argument_shapes,
       const ExecutionOptions* execution_options,
-      bool has_hybrid_result = false);
+      const UserComputation& user_computation);
 
-  // Builds an Executable for the given parameters. If
-  // executable_for_compute_constant is true, then the executable is intended to
-  // be used for ComputeConstant which means dead parameter instructions are not
-  // included in the executable.The parameter "profile" can optionally point to
-  // an ExecutionProfile object which will be filled in with profile data
-  // relevant to compilation.
+  // Builds an Executable for the given parameters.
+  //
+  // If device_allocator is not null, the compiler may use it to allocate temp
+  // buffers, which the compiler is responsible for freeing.  The allocator
+  // given here need not match the allocator used when running the executable.
   StatusOr<std::unique_ptr<Executable>> BuildExecutable(
       const VersionedComputationHandle& versioned_handle,
-      std::unique_ptr<HloModuleConfig> module_config,
-      bool executable_for_compute_constant,
-      const tensorflow::gtl::ArraySlice<perftools::gputools::DeviceMemoryBase>
-          arguments,
-      Backend* backend, perftools::gputools::StreamExecutor* executor);
+      std::unique_ptr<HloModuleConfig> module_config, Backend* backend,
+      perftools::gputools::StreamExecutor* executor,
+      DeviceMemoryAllocator* device_allocator = nullptr);
 
   // Same as BuildExecutable() above, but builds a list of Executables for the
   // given computations that may interact with each other.
@@ -300,18 +296,17 @@ class Service : public ServiceInterface {
       std::vector<VersionedComputationHandle> versioned_handles,
       std::vector<std::unique_ptr<HloModuleConfig>> module_configs,
       Backend* backend,
-      std::vector<perftools::gputools::StreamExecutor*> executors);
+      std::vector<std::vector<perftools::gputools::StreamExecutor*>> executors,
+      DeviceMemoryAllocator* device_allocator);
 
   // Similar to BuildExecutable, but look in the compilation cache for the
   // executable first. If the executable is not in the cache, it is built and
   // inserted into the cache.
   StatusOr<std::shared_ptr<Executable>> BuildAndCacheExecutable(
       const VersionedComputationHandle& versioned_handle,
-      std::unique_ptr<HloModuleConfig> module_config,
-      const tensorflow::gtl::ArraySlice<perftools::gputools::DeviceMemoryBase>
-          arguments,
-      Backend* backend, perftools::gputools::StreamExecutor* executor,
-      ExecutionProfile* profile);
+      std::unique_ptr<HloModuleConfig> module_config, Backend* backend,
+      perftools::gputools::StreamExecutor* executor, ExecutionProfile* profile,
+      DeviceMemoryAllocator* device_allocator = nullptr);
 
   // Runs the given executable with the given arguments and register the result
   // in the allocation tracker. The handle of the result from the tracker is
@@ -319,8 +314,7 @@ class Service : public ServiceInterface {
   // ExecutionProfile object which will be filled in with profile data.
   StatusOr<GlobalDataHandle> ExecuteAndRegisterResult(
       Executable* executable,
-      const tensorflow::gtl::ArraySlice<perftools::gputools::DeviceMemoryBase>
-          arguments,
+      const tensorflow::gtl::ArraySlice<const ShapedBuffer*> arguments,
       Backend* backend, perftools::gputools::StreamExecutor* executor,
       const string& result_tag, ExecutionProfile* profile);
 
@@ -329,12 +323,11 @@ class Service : public ServiceInterface {
   // from the tracker are returned.
   StatusOr<std::vector<GlobalDataHandle>> ExecuteParallelAndRegisterResult(
       tensorflow::gtl::ArraySlice<Executable*> executables,
-      tensorflow::gtl::ArraySlice<
-          std::vector<perftools::gputools::DeviceMemoryBase>>
-          arguments,
+      tensorflow::gtl::ArraySlice<std::vector<const ShapedBuffer*>> arguments,
       Backend* backend,
       tensorflow::gtl::ArraySlice<DeviceHandle> device_handles,
-      tensorflow::gtl::ArraySlice<string> result_tags);
+      tensorflow::gtl::ArraySlice<string> result_tags,
+      ExecutionProfile* profile);
 
   // Convenience function for adding a function to a user computation.
   template <typename RequestT, typename ResponseT>
@@ -354,6 +347,8 @@ class Service : public ServiceInterface {
   // represents a set of physical devices for the replicas.
   StatusOr<std::vector<perftools::gputools::StreamExecutor*>> Replicas(
       const Backend& backend, const DeviceHandle& device_handle) const;
+
+  Status MaybeDumpHloModule(const HloModule& module) const;
 
   // Returns the device handle that represents the replicated device for a
   // single computation that is not model-parallelized.
@@ -380,9 +375,6 @@ class Service : public ServiceInterface {
   //
   // TODO(b/28616830): Support multiple backends for execution.
   std::unique_ptr<Backend> execute_backend_;
-
-  // Backend to use when executing ComputeConstant.
-  std::unique_ptr<Backend> compute_constant_backend_;
 
   TF_DISALLOW_COPY_AND_ASSIGN(Service);
 };

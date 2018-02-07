@@ -17,9 +17,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from tensorflow.contrib import framework as contrib_framework
 from tensorflow.contrib import layers
-
+from tensorflow.contrib.learn.python.learn.estimators import constants
 from tensorflow.contrib.learn.python.learn.estimators import estimator
 from tensorflow.contrib.learn.python.learn.estimators import head as head_lib
 from tensorflow.contrib.learn.python.learn.estimators import model_fn as model_fn_lib
@@ -38,13 +37,14 @@ from tensorflow.python.ops import variable_scope
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.summary import summary
 from tensorflow.python.training import session_run_hook
+from tensorflow.python.training import training_util
 
 
 KEYS_NAME = 'keys'
 LOSS_NAME = 'rf_training_loss'
 TREE_PATHS_PREDICTION_KEY = 'tree_paths'
-VARIANCE_PREDICTION_KEY = 'regression_variance'
-
+VARIANCE_PREDICTION_KEY = 'prediction_variance'
+ALL_SERVING_KEY = 'tensorforest_all'
 EPSILON = 0.000001
 
 
@@ -80,7 +80,7 @@ class TensorForestLossHook(session_run_hook.SessionRunHook):
             run_context.session.graph.get_operation_by_name(
                 LOSS_NAME).outputs[0])
     return session_run_hook.SessionRunArgs(
-        {'global_step': contrib_framework.get_global_step(),
+        {'global_step': training_util.get_global_step(),
          'current_loss': loss})
 
   def after_run(self, run_context, run_values):
@@ -134,7 +134,8 @@ def get_model_fn(params,
                  trainer_id=0,
                  report_feature_importances=False,
                  local_eval=False,
-                 head_scope=None):
+                 head_scope=None,
+                 include_all_in_serving=False):
   """Return a model function given a way to construct a graph builder."""
   if model_head is None:
     model_head = get_default_head(params, weights_name)
@@ -189,7 +190,7 @@ def get_model_fn(params,
                 features, labels, input_weights=weights,
                 num_trainers=num_trainers,
                 trainer_id=trainer_id),
-            state_ops.assign_add(contrib_framework.get_global_step(), 1))
+            state_ops.assign_add(training_util.get_global_step(), 1))
 
     # Put weights back in
     if weights is not None:
@@ -237,9 +238,14 @@ def get_model_fn(params,
     if params.inference_tree_paths:
       model_ops.predictions[TREE_PATHS_PREDICTION_KEY] = tree_paths
 
-    if params.regression:
-      model_ops.predictions[VARIANCE_PREDICTION_KEY] = regression_variance
-
+    model_ops.predictions[VARIANCE_PREDICTION_KEY] = regression_variance
+    if include_all_in_serving:
+      # In order to serve the variance we need to add the prediction dict
+      # to output_alternatives dict.
+      if not model_ops.output_alternatives:
+        model_ops.output_alternatives = {}
+      model_ops.output_alternatives[ALL_SERVING_KEY] = (
+          constants.ProblemType.UNSPECIFIED, model_ops.predictions)
     return model_ops
 
   return _model_fn
@@ -294,7 +300,8 @@ class TensorForestEstimator(estimator.Estimator):
                report_feature_importances=False,
                local_eval=False,
                version=None,
-               head=None):
+               head=None,
+               include_all_in_serving=False):
     """Initializes a TensorForestEstimator instance.
 
     Args:
@@ -340,6 +347,23 @@ class TensorForestEstimator(estimator.Estimator):
       version: Unused.
       head: A heads_lib.Head object that calculates losses and such. If None,
         one will be automatically created based on params.
+      include_all_in_serving: if True, allow preparation of the complete
+        prediction dict including the variance to be exported for serving with
+        the Servo lib; and it also requires calling export_savedmodel with
+        default_output_alternative_key=ALL_SERVING_KEY, i.e.
+        estimator.export_savedmodel(export_dir_base=your_export_dir,
+          serving_input_fn=your_export_input_fn,
+          default_output_alternative_key=ALL_SERVING_KEY)
+        if False, resort to default behavior, i.e. export scores and
+          probabilities but no variances. In this case
+          default_output_alternative_key should be None while calling
+          export_savedmodel().
+        Note, that due to backward compatibility we cannot always set
+        include_all_in_serving to True because in this case calling
+        export_saved_model() without
+        default_output_alternative_key=ALL_SERVING_KEY (legacy behavior) the
+        saved_model_export_utils.get_output_alternatives() would raise
+        ValueError.
 
     Returns:
       A `TensorForestEstimator` instance.
@@ -358,7 +382,9 @@ class TensorForestEstimator(estimator.Estimator):
             num_trainers=num_trainers,
             trainer_id=trainer_id,
             report_feature_importances=report_feature_importances,
-            local_eval=local_eval),
+            local_eval=local_eval,
+            include_all_in_serving=include_all_in_serving,
+        ),
         model_dir=model_dir,
         config=config,
         feature_engineering_fn=feature_engineering_fn)

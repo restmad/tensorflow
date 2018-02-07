@@ -19,8 +19,8 @@ limitations under the License.
 // IWYU pragma: private, include "third_party/tensorflow/core/platform/logging.h"
 // IWYU pragma: friend third_party/tensorflow/core/platform/logging.h
 
-#include <sstream>
 #include <limits>
+#include <sstream>
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/types.h"
 
@@ -45,16 +45,6 @@ class LogMessage : public std::basic_ostringstream<char> {
   // E.g., if MinVLogLevel() is 2, then VLOG(2) statements will produce output,
   // but VLOG(3) will not. Defaults to 0.
   static int64 MinVLogLevel();
-
-  // Returns whether VLOG level lvl is activated for the file fname.
-  //
-  // E.g. if the environment variable TF_CPP_VMODULE contains foo=3 and fname is
-  // foo.cc and lvl is <= 3, this will return true.
-  //
-  // It is expected that the result of this query will be cached in the VLOG-ing
-  // call site to avoid repeated lookups. This routine performs a hash-map
-  // access against the VLOG-ing specification provided by the env var.
-  static bool VmoduleActivated(const char* fname, int lvl);
 
  protected:
   void GenerateLogMessage();
@@ -86,38 +76,18 @@ class LogMessageFatal : public LogMessage {
 
 #define LOG(severity) _TF_LOG_##severity
 
-#if defined(IS_MOBILE_PLATFORM)
-
+#ifdef IS_MOBILE_PLATFORM
 // Turn VLOG off when under mobile devices for considerations of binary size.
-#define _VLOG_IS_ON(lvl, file) ((lvl) <= 0)
-
-#elif defined(PLATFORM_WINDOWS)
-
-// TODO(b/64279502) The _VLOG_IS_ON definition below appears to cause MSVC to
-// fatal error, so we fall back to the vmodule-less implementation for now.
-#define _VLOG_IS_ON(lvl, file) \
-  ((lvl) <= ::tensorflow::internal::LogMessage::MinVLogLevel())
-
+#define VLOG_IS_ON(lvl) ((lvl) <= 0)
 #else
-
-// Otherwise, set TF_CPP_MIN_VLOG_LEVEL environment to update minimum log level
-// of VLOG, or TF_CPP_VMODULE to set the minimum log level for individual
-// translation units.
-#define _VLOG_IS_ON(lvl, file)                                              \
-  (([](int level, const char* fname) {                                      \
-    if (level <= ::tensorflow::internal::LogMessage::MinVLogLevel())        \
-      return true;                                                          \
-    static bool vmodule_activated =                                         \
-        ::tensorflow::internal::LogMessage::VmoduleActivated(fname, level); \
-    return vmodule_activated;                                               \
-  })(lvl, file))
-
+// Otherwise, Set TF_CPP_MIN_VLOG_LEVEL environment to update minimum log level
+// of VLOG
+#define VLOG_IS_ON(lvl) \
+  ((lvl) <= ::tensorflow::internal::LogMessage::MinVLogLevel())
 #endif
 
-#define VLOG_IS_ON(lvl) _VLOG_IS_ON(lvl, __FILE__)
-
-#define VLOG(lvl)                                   \
-  if (TF_PREDICT_FALSE(_VLOG_IS_ON(lvl, __FILE__))) \
+#define VLOG(lvl)                        \
+  if (TF_PREDICT_FALSE(VLOG_IS_ON(lvl))) \
   ::tensorflow::internal::LogMessage(__FILE__, __LINE__, tensorflow::INFO)
 
 // CHECK dies with a fatal error if condition is not true.  It is *not*
@@ -235,16 +205,18 @@ string* MakeCheckOpString(const T1& v1, const T2& v2, const char* exprtext) {
   inline string* name##Impl(int v1, int v2, const char* exprtext) {       \
     return name##Impl<int, int>(v1, v2, exprtext);                        \
   }                                                                       \
-  inline string* name##Impl(const size_t v1, const int v2, const char* exprtext) {       \
+  inline string* name##Impl(const size_t v1, const int v2,                \
+                            const char* exprtext) {                       \
     if (TF_PREDICT_FALSE(v2 < 0)) {                                       \
-       return ::tensorflow::internal::MakeCheckOpString(v1, v2, exprtext);\
+      return ::tensorflow::internal::MakeCheckOpString(v1, v2, exprtext); \
     }                                                                     \
     const size_t uval = (size_t)((unsigned)v1);                           \
     return name##Impl<size_t, size_t>(uval, v2, exprtext);                \
   }                                                                       \
-  inline string* name##Impl(const int v1, const size_t v2, const char* exprtext) {       \
-    if (TF_PREDICT_FALSE(v2 >= std::numeric_limits<int>::max())) {      \
-       return ::tensorflow::internal::MakeCheckOpString(v1, v2, exprtext);\
+  inline string* name##Impl(const int v1, const size_t v2,                \
+                            const char* exprtext) {                       \
+    if (TF_PREDICT_FALSE(v2 >= std::numeric_limits<int>::max())) {        \
+      return ::tensorflow::internal::MakeCheckOpString(v1, v2, exprtext); \
     }                                                                     \
     const size_t uval = (size_t)((unsigned)v2);                           \
     return name##Impl<size_t, size_t>(v1, uval, exprtext);                \
@@ -255,12 +227,12 @@ string* MakeCheckOpString(const T1& v1, const T2& v2, const char* exprtext) {
 // This happens if, for example, those are used as token names in a
 // yacc grammar.
 TF_DEFINE_CHECK_OP_IMPL(Check_EQ,
-                        == )  // Compilation error with CHECK_EQ(NULL, x)?
-TF_DEFINE_CHECK_OP_IMPL(Check_NE, != )  // Use CHECK(x == NULL) instead.
-TF_DEFINE_CHECK_OP_IMPL(Check_LE, <= )
-TF_DEFINE_CHECK_OP_IMPL(Check_LT, < )
-TF_DEFINE_CHECK_OP_IMPL(Check_GE, >= )
-TF_DEFINE_CHECK_OP_IMPL(Check_GT, > )
+                        ==)  // Compilation error with CHECK_EQ(NULL, x)?
+TF_DEFINE_CHECK_OP_IMPL(Check_NE, !=)  // Use CHECK(x == NULL) instead.
+TF_DEFINE_CHECK_OP_IMPL(Check_LE, <=)
+TF_DEFINE_CHECK_OP_IMPL(Check_LT, <)
+TF_DEFINE_CHECK_OP_IMPL(Check_GE, >=)
+TF_DEFINE_CHECK_OP_IMPL(Check_GT, >)
 #undef TF_DEFINE_CHECK_OP_IMPL
 
 // In optimized mode, use CheckOpString to hint to compiler that
@@ -334,6 +306,10 @@ T&& CheckNotNull(const char* file, int line, const char* exprtext, T&& t) {
   }
   return std::forward<T>(t);
 }
+
+int64 MinLogLevelFromEnv();
+
+int64 MinVLogLevelFromEnv();
 
 }  // namespace internal
 }  // namespace tensorflow

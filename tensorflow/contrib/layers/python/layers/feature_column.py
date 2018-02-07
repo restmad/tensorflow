@@ -156,6 +156,10 @@ from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.util import deprecation
 
 
+# Imports the core `InputLayer` symbol in contrib during development.
+InputLayer = fc_core.InputLayer  # pylint: disable=invalid-name
+
+
 class _LinearEmbeddingLookupArguments(
     collections.namedtuple("_LinearEmbeddingLookupArguments",
                            ["input_tensor",
@@ -521,7 +525,7 @@ def sparse_column_with_integerized_feature(column_name,
 
   Args:
     column_name: A string defining sparse column name.
-    bucket_size: An int that is > 1. The number of buckets. It should be bigger
+    bucket_size: An int that is >= 1. The number of buckets. It should be bigger
       than maximum feature. In other words features in this column should be an
       int64 in range [0, bucket_size)
     combiner: A string specifying how to reduce if the sparse column is
@@ -539,7 +543,7 @@ def sparse_column_with_integerized_feature(column_name,
     An integerized _SparseColumn definition.
 
   Raises:
-    ValueError: bucket_size is not greater than 1.
+    ValueError: bucket_size is less than 1.
     ValueError: dtype is not integer.
   """
   return _SparseColumnIntegerized(
@@ -749,6 +753,10 @@ class _WeightedSparseColumn(
     return config
 
   @property
+  def lookup_config(self):
+    return self.sparse_id_column.lookup_config
+
+  @property
   def key(self):
     """Returns a string which will be used as a key when we do sorting."""
     return "{}".format(self)
@@ -816,6 +824,12 @@ class _WeightedSparseColumn(
     input_tensor = inputs.get(self)
     return fc_core._CategoricalColumn.IdWeightPair(  # pylint: disable=protected-access
         self.id_tensor(input_tensor), self.weight_tensor(input_tensor))
+
+  def is_compatible(self, other_column):
+    """Check compatibility with other sparse column."""
+    if isinstance(other_column, _WeightedSparseColumn):
+      return self.sparse_id_column.is_compatible(other_column.sparse_id_column)
+    return self.sparse_id_column.is_compatible(other_column)
 
 
 def weighted_sparse_column(sparse_id_column,
@@ -933,6 +947,11 @@ class _OneHotColumn(
       weighted_column = sparse_ops.sparse_merge(sp_ids=sparse_id_column,
                                                 sp_values=weight_tensor,
                                                 vocab_size=self.length)
+      # Remove (?, -1) index
+      weighted_column = sparse_ops.sparse_slice(
+          weighted_column,
+          [0, 0],
+          weighted_column.dense_shape)
       return sparse_ops.sparse_tensor_to_dense(weighted_column)
 
     dense_id_tensor = sparse_ops.sparse_tensor_to_dense(sparse_id_column,
@@ -1340,7 +1359,8 @@ def shared_embedding_columns(sparse_id_columns,
     ValueError: if sparse_id_columns is empty, or its elements are not
       compatible with each other.
     TypeError: if `sparse_id_columns` is not a sequence or is a string. If at
-      least one element of `sparse_id_columns` is not a `SparseTensor`.
+      least one element of `sparse_id_columns` is not a `SparseColumn` or a
+      `WeightedSparseColumn`.
   """
   if (not isinstance(sparse_id_columns, collections.Sequence) or
       isinstance(sparse_id_columns, six.string_types)):
@@ -1351,9 +1371,11 @@ def shared_embedding_columns(sparse_id_columns,
     raise ValueError("The input sparse_id_columns should have at least one "
                      "element.")
   for sparse_id_column in sparse_id_columns:
-    if not isinstance(sparse_id_column, _SparseColumn):
-      raise TypeError("Elements of sparse_id_columns must be _SparseColumn, "
-                      "but {} is not.".format(sparse_id_column))
+    if not (isinstance(sparse_id_column, _SparseColumn) or
+            isinstance(sparse_id_column, _WeightedSparseColumn)):
+      raise TypeError("Elements of sparse_id_columns must be _SparseColumn or "
+                      "_WeightedSparseColumn, but {} is not."
+                      .format(sparse_id_column))
 
   if len(sparse_id_columns) == 1:
     return [
@@ -1362,17 +1384,30 @@ def shared_embedding_columns(sparse_id_columns,
                          shared_embedding_name, max_norm=max_norm,
                          trainable=trainable)]
   else:
-    # check compatibility of sparse_id_columns
+    # Check compatibility of sparse_id_columns
     compatible = True
     for column in sparse_id_columns[1:]:
-      compatible = compatible and column.is_compatible(sparse_id_columns[0])
+      if isinstance(sparse_id_columns[0], _WeightedSparseColumn):
+        compatible = compatible and sparse_id_columns[0].is_compatible(column)
+      else:
+        compatible = compatible and column.is_compatible(sparse_id_columns[0])
     if not compatible:
       raise ValueError("The input sparse id columns are not compatible.")
     # Construct the shared name and size for shared embedding space.
     if not shared_embedding_name:
       # Sort the columns so that shared_embedding_name will be deterministic
       # even if users pass in unsorted columns from a dict or something.
-      sorted_columns = sorted(sparse_id_columns)
+      # Since they are different classes, ordering is SparseColumns first,
+      # then WeightedSparseColumns.
+      sparse_columns = []
+      weighted_sparse_columns = []
+      for column in sparse_id_columns:
+        if isinstance(column, _SparseColumn):
+          sparse_columns.append(column)
+        else:
+          weighted_sparse_columns.append(column)
+      sorted_columns = sorted(sparse_columns) + sorted(
+          weighted_sparse_columns, key=lambda x: x.name)
       if len(sorted_columns) <= 3:
         shared_embedding_name = "_".join([column.name
                                           for column in sorted_columns])
@@ -2537,10 +2572,10 @@ def _create_sequence_feature_spec_for_parsing(sequence_feature_columns,
   feature_spec = create_feature_spec_for_parsing(sequence_feature_columns)
   sequence_feature_spec = {}
   for key, feature in feature_spec.items():
-    if (isinstance(feature, parsing_ops.VarLenFeature) or
-        isinstance(feature, parsing_ops.FixedLenSequenceFeature)):
+    if isinstance(feature, parsing_ops.VarLenFeature):
       sequence_feature = feature
-    elif isinstance(feature, parsing_ops.FixedLenFeature):
+    elif (isinstance(feature, parsing_ops.FixedLenFeature) or
+          isinstance(feature, parsing_ops.FixedLenSequenceFeature)):
       default_is_set = feature.default_value is not None
       if default_is_set:
         logging.warning(

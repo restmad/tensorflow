@@ -26,16 +26,6 @@ limitations under the License.
 namespace tensorflow {
 namespace grappler {
 
-int NumNonControlInputs(const NodeDef& node) {
-  int num_inputs = node.input_size();
-  for (int i = 0; i < node.input_size(); ++i) {
-    if (!node.input(i).empty() && node.input(i)[0] == '^') {
-      num_inputs--;
-    }
-  }
-  return num_inputs;
-}
-
 bool IsTrivialOp(const NodeDef& node) {
   // Remove the stop gradient nodes since they serve no purpose once the graph
   // is built. Also remove Identity ops.
@@ -51,28 +41,7 @@ bool IsTrivialOp(const NodeDef& node) {
 
 Status ModelPruner::Optimize(Cluster* cluster, const GrapplerItem& item,
                              GraphDef* pruned_graph) {
-
-  std::unordered_set<string> nodes_to_preserve;
-  for (const auto& node : item.fetch) {
-    nodes_to_preserve.insert(NodeName(node));
-  }
-  for (const auto& feed : item.feed) {
-    nodes_to_preserve.insert(NodeName(feed.first));
-  }
-  for (const auto& node : item.init_ops) {
-    nodes_to_preserve.insert(NodeName(node));
-  }
-  for (const auto& queue_runner : item.queue_runners) {
-    for (const string& enqueue_op : queue_runner.enqueue_op_name()) {
-      nodes_to_preserve.insert(NodeName(enqueue_op));
-    }
-    if (!queue_runner.close_op_name().empty()) {
-      nodes_to_preserve.insert(NodeName(queue_runner.close_op_name()));
-    }
-    if (!queue_runner.cancel_op_name().empty()) {
-      nodes_to_preserve.insert(NodeName(queue_runner.cancel_op_name()));
-    }
-  }
+  std::unordered_set<string> nodes_to_preserve = item.NodesToPreserve();
 
   // Prune all the nodes that won't be executed, ie all the nodes that aren't in
   // the fanin of a fetch node. If fetch nodes aren't specified, we'll assume
@@ -125,7 +94,7 @@ Status ModelPruner::Optimize(Cluster* cluster, const GrapplerItem& item,
     // - Don't remove nodes that receive reference values, as those can be
     //   converting references to non-references. It is important to preserve
     //   these non-references since the partitioner will avoid sending
-    //   non-references accross partitions more than once.
+    //   non-references across partitions more than once.
     if (!rewriter.DrivesControlDependency(node) &&
         !rewriter.IsDrivenByControlDependency(node) &&
         !rewriter.IsConnectedToFunction(node) &&

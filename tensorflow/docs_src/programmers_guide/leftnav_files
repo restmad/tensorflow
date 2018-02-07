@@ -1,15 +1,28 @@
 index.md
+
+### High Level APIs
+estimators.md
+datasets.md
+
+### Low Level APIs
+low_level_intro.md
 tensors.md
 variables.md
-dims_types.md
 graphs.md
-datasets.md
-threading_and_queues.md
-reading_data.md
-embedding.md
-debugger.md
-supervisor.md
 saved_model.md
-meta_graph.md
+using_gpu.md
+
+### ML Concepts
+embedding.md
+
+### Debugging
+debugger.md
+
+### TensorBoard
+summaries_and_tensorboard.md
+graph_viz.md
+tensorboard_histograms.md
+
+### Misc
 version_compat.md
 faq.md

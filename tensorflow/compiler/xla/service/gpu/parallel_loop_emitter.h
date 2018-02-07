@@ -42,6 +42,11 @@ class ParallelLoopEmitter : public llvm_ir::LoopEmitter {
                       const LaunchDimensions& launch_dimensions,
                       llvm::IRBuilder<>* ir_builder);
 
+  // Constructs a loop emitter for a loop that generates on element of each of N
+  // arrays on each iteration.
+  //
+  // This is used in multi-output fusion.  target_element_generator should
+  // produce a struct with N elements, one for each of target_arrays.
   ParallelLoopEmitter(
       const llvm_ir::ElementGenerator& target_element_generator,
       tensorflow::gtl::ArraySlice<llvm_ir::IrArray> target_arrays,
@@ -51,7 +56,8 @@ class ParallelLoopEmitter : public llvm_ir::LoopEmitter {
   ParallelLoopEmitter& operator=(const ParallelLoopEmitter&) = delete;
   ~ParallelLoopEmitter() override = default;
 
-  llvm_ir::IrArray::Index EmitIndexAndSetExitBasicBlock() override;
+  llvm_ir::IrArray::Index EmitIndexAndSetExitBasicBlock(
+      tensorflow::StringPiece loop_name) override;
 
  private:
   // The thread and block dimension to parallelize the loop on.

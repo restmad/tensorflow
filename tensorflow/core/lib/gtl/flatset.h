@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef THIRD_PARTY_TENSORFLOW_CORE_LIB_GTL_FLATSET_H_
-#define THIRD_PARTY_TENSORFLOW_CORE_LIB_GTL_FLATSET_H_
+#ifndef TENSORFLOW_CORE_LIB_GTL_FLATSET_H_
+#define TENSORFLOW_CORE_LIB_GTL_FLATSET_H_
 
 #include <stddef.h>
 #include <functional>
@@ -108,8 +108,8 @@ class FlatSet {
     const_iterator(Bucket* b, Bucket* end, uint32 i)
         : b_(b), end_(end), i_(i) {}
 
-    reference operator*() { return key(); }
-    pointer operator->() { return &key(); }
+    reference operator*() const { return key(); }
+    pointer operator->() const { return &key(); }
     bool operator==(const const_iterator& x) const {
       return b_ == x.b_ && i_ == x.i_;
     }
@@ -278,4 +278,4 @@ class FlatSet {
 }  // namespace gtl
 }  // namespace tensorflow
 
-#endif  // THIRD_PARTY_TENSORFLOW_CORE_LIB_GTL_FLATSET_H_
+#endif  // TENSORFLOW_CORE_LIB_GTL_FLATSET_H_

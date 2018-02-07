@@ -14,6 +14,8 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/compiler/tf2xla/kernels/cwise_ops.h"
+#include "tensorflow/compiler/tf2xla/kernels/gather_op_helpers.h"
+#include "tensorflow/compiler/tf2xla/kernels/shape_util.h"
 #include "tensorflow/compiler/tf2xla/shape_util.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
@@ -21,6 +23,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/literal_util.h"
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/kernels/bounds_check.h"
 #include "tensorflow/core/kernels/no_op.h"
 
 namespace tensorflow {
@@ -30,24 +33,31 @@ class VarIsInitializedOp : public XlaOpKernel {
  public:
   explicit VarIsInitializedOp(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {}
   void Compile(XlaOpKernelContext* ctx) override {
-    xla::ComputationDataHandle handle;
-    bool initialized = ctx->ReadVariableInput(0, &handle).ok();
-    ctx->SetOutput(0, ctx->builder()->ConstantR0<bool>(initialized));
+    XlaResource* variable;
+    OP_REQUIRES_OK(ctx, ctx->GetResourceInput(0, &variable));
+    ctx->SetOutput(0,
+                   ctx->builder()->ConstantR0<bool>(variable->initialized()));
   }
 };
 REGISTER_XLA_OP(Name("VarIsInitializedOp"), VarIsInitializedOp);
 
 class ReadVariableOp : public XlaOpKernel {
  public:
-  explicit ReadVariableOp(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {}
+  explicit ReadVariableOp(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("dtype", &dtype_));
+  }
+
   void Compile(XlaOpKernelContext* ctx) override {
     xla::ComputationDataHandle handle;
-    OP_REQUIRES_OK(ctx, ctx->ReadVariableInput(0, &handle));
+    OP_REQUIRES_OK(
+        ctx, ctx->ReadVariableInput(0, dtype_, /*shape=*/nullptr, &handle));
     ctx->SetOutput(0, handle);
   }
+
+ private:
+  DataType dtype_;
 };
 REGISTER_XLA_OP(Name("ReadVariableOp"), ReadVariableOp);
-REGISTER_XLA_OP(Name("_UnsafeReadVariable"), ReadVariableOp);
 
 class AssignVariableOp : public XlaOpKernel {
  public:
@@ -63,10 +73,12 @@ class AssignAddVariableOp : public XlaOpKernel {
  public:
   explicit AssignAddVariableOp(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {}
   void Compile(XlaOpKernelContext* ctx) override {
+    DataType type = ctx->input_type(1);
     xla::ComputationDataHandle handle;
-    OP_REQUIRES_OK(ctx, ctx->ReadVariableInput(0, &handle));
+    OP_REQUIRES_OK(ctx,
+                   ctx->ReadVariableInput(0, type, /*shape=*/nullptr, &handle));
     handle = ctx->builder()->Add(handle, ctx->Input(1));
-    OP_REQUIRES_OK(ctx, ctx->AssignVariable(0, ctx->input_type(1), handle));
+    OP_REQUIRES_OK(ctx, ctx->AssignVariable(0, type, handle));
   }
 };
 REGISTER_XLA_OP(
@@ -77,10 +89,12 @@ class AssignSubVariableOp : public XlaOpKernel {
  public:
   explicit AssignSubVariableOp(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {}
   void Compile(XlaOpKernelContext* ctx) override {
+    DataType type = ctx->input_type(1);
     xla::ComputationDataHandle handle;
-    OP_REQUIRES_OK(ctx, ctx->ReadVariableInput(0, &handle));
+    OP_REQUIRES_OK(ctx,
+                   ctx->ReadVariableInput(0, type, /*shape=*/nullptr, &handle));
     handle = ctx->builder()->Sub(handle, ctx->Input(1));
-    OP_REQUIRES_OK(ctx, ctx->AssignVariable(0, ctx->input_type(1), handle));
+    OP_REQUIRES_OK(ctx, ctx->AssignVariable(0, type, handle));
   }
 };
 REGISTER_XLA_OP(
@@ -93,63 +107,47 @@ class ResourceGatherOp : public XlaOpKernel {
   void Compile(XlaOpKernelContext* ctx) override {
     xla::ComputationBuilder* builder = ctx->builder();
 
-    // Get the shape of the resource tensor.
+    DataType type = ctx->expected_output_dtype(0);
+
     TensorShape resource_shape;
-    DataType resource_dtype;
-    OP_REQUIRES_OK(
-        ctx, ctx->GetVariableTypeAndShape(0, &resource_dtype, &resource_shape));
-
-    DataType expected_output_dtype = ctx->expected_output_dtype(0);
-    OP_REQUIRES(ctx, resource_dtype == expected_output_dtype,
-                errors::InvalidArgument(
-                    "Variable dtype is ", DataTypeString(resource_dtype),
-                    " but expected output dtype is ",
-                    DataTypeString(expected_output_dtype), "."));
-
     xla::ComputationDataHandle resource_handle;
-    OP_REQUIRES_OK(ctx, ctx->ReadVariableInput(0, &resource_handle));
+    OP_REQUIRES_OK(ctx, ctx->ReadVariableInput(0, type, &resource_shape,
+                                               &resource_handle));
 
     auto indices = ctx->Input(1);
     auto indices_shape = ctx->InputShape(1);
-    const int num_indices = indices_shape.num_elements();
-
-    // Flatten the indices into 1-D.
-    auto indices_1d = builder->Reshape(indices, {num_indices});
-
-    // Compute the slice for each of these indices separately.
-    std::vector<xla::ComputationDataHandle> slices(num_indices);
-    for (int i = 0; i < num_indices; ++i) {
-      auto index = builder->Slice(indices_1d, {i}, {i + 1}, {1});
-
-      auto start_indices =
-          XlaHelpers::PadWithZeros(builder, index, resource_shape.dims() - 1);
-
-      auto slice_shape = resource_shape.dim_sizes();
-      slice_shape[0] = 1LL;
-
-      slices[i] =
-          builder->DynamicSlice(resource_handle, start_indices, slice_shape);
-    }
-
-    // Concatenate the slices into one tensor.
-    xla::ComputationDataHandle concat = builder->ConcatInDim(slices, 0);
-
-    // Compute the shape of the result tensor, which is:
-    //    indices.shape + resource.shape[1:]
-    TensorShape gather_shape = indices_shape;
-    gather_shape.AppendShape(resource_shape);
-    gather_shape.RemoveDim(indices_shape.dims());
-
-    // Reshape the concatenated slices into the shape expected of the result
-    // tensor.
-    xla::ComputationDataHandle gather =
-        builder->Reshape(concat, gather_shape.dim_sizes());
-
+    DataType index_type = ctx->input_type(1);
+    xla::ComputationDataHandle gather;
+    OP_REQUIRES_OK(
+        ctx, XlaGather(resource_handle, resource_shape, indices, indices_shape,
+                       /*axis=*/0, /*indices_are_nd=*/false, type, index_type,
+                       builder, &gather));
     ctx->SetOutput(0, gather);
   }
 };
 REGISTER_XLA_OP(Name("ResourceGather").TypeConstraint("dtype", kNumericTypes),
                 ResourceGatherOp);
 
+class VariableShapeOp : public XlaOpKernel {
+ public:
+  explicit VariableShapeOp(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("out_type", &out_dtype_));
+  }
+
+  void Compile(XlaOpKernelContext* ctx) override {
+    DataType variable_dtype;
+    TensorShape shape;
+    OP_REQUIRES_OK(ctx,
+                   ctx->GetVariableTypeAndShape(0, &variable_dtype, &shape));
+    Tensor shape_constant(out_dtype_, TensorShape({shape.dims()}));
+    OP_REQUIRES_OK(ctx, TensorShapeToConstant(shape, &shape_constant));
+    ctx->SetConstantOutput(0, shape_constant);
+  }
+
+ private:
+  DataType out_dtype_;
+};
+
+REGISTER_XLA_OP(Name("VariableShape"), VariableShapeOp);
 }  // namespace
 }  // namespace tensorflow
